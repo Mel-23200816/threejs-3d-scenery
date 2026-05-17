@@ -355,7 +355,7 @@ loader.load("scene.gltf", (gltf) => {
             child.castShadow = true;
             child.receiveShadow = true;
 
-            // Mantenemos la corrección de materiales que platicamos antes
+            // Corrección de materiales 
             if (child.material) {
                 child.material.transparent = false;
                 child.material.depthWrite = true;
@@ -367,7 +367,27 @@ loader.load("scene.gltf", (gltf) => {
         }
     });
 
-    // ... el resto de tu lógica de OctreeHelper y GUI se mantiene igual
+    // --- SOLUCIÓN: RESET DE SPAWN POST-CARGA ---
+    // Colocamos al jugador en el punto de inicio 
+    playerCollider.start.set(0, 0.35, 0);
+    playerCollider.end.set(0, 1, 0);
+    
+    // Matamos la inercia de la gravedad que se acumuló mientras cargaba
+    playerVelocity.set(0, 0, 0); 
+    
+    // Alineamos la cámara
+    camera.position.copy(playerCollider.end);
+    // -------------------------------------------
+
+    // Restauramos el OctreeHelper y GUI para que puedas hacer debugging visual
+    const helper = new OctreeHelper(worldOctree);
+    helper.visible = false;
+    scene.add(helper);
+
+    const gui = new GUI({ width: 200 });
+    gui.add({ debug: false }, "debug").onChange(function (value) {
+        helper.visible = value;
+    });
 });
 
 function teleportPlayerIfOob() {
