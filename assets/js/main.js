@@ -93,7 +93,6 @@ const playerCollider = new Capsule(
     0.35,
 );
 
-// --- VARIABLES DE TERCERA PERSONA Y ANIMACIÓN ---
 let cameraYaw = 0;
 let cameraPitch = 0;
 const MAX_CAMERA_DISTANCE = 4.0;
@@ -101,28 +100,31 @@ const MAX_CAMERA_DISTANCE = 4.0;
 const playerMesh = new THREE.Group();
 scene.add(playerMesh);
 
+// --- VARIABLES DE MÁQUINA DE ESTADOS ---
 let mixer;
 const actions = {};
 let activeAction;
+let activeThrowAction = null; 
+let isThrowing = false; // Bandera para saber si está en medio de un lanzamiento
 
-// --- CARGA ASÍNCRONA DEL PERSONAJE Y ANIMACIONES EN FBX ---
-// Asegúrate de que esta ruta apunte donde tienes tus archivos FBX
 const characterLoader = new FBXLoader().setPath("./assets/models/fbx/");
 
-const loadBase  = () => characterLoader.loadAsync("Vanguard By T. Choonyung.fbx");
-const loadIdle  = () => characterLoader.loadAsync("Breathing Idle.fbx");
-const loadWalk  = () => characterLoader.loadAsync("Walking.fbx");
-const loadRun   = () => characterLoader.loadAsync("Running.fbx");
+const loadBase   = () => characterLoader.loadAsync("Vanguard By T. Choonyung.fbx");
+const loadIdle   = () => characterLoader.loadAsync("Breathing Idle.fbx");
+const loadWalk   = () => characterLoader.loadAsync("Walking.fbx");
+const loadRun    = () => characterLoader.loadAsync("Running.fbx");
+// NUEVAS ANIMACIONES
+const loadJump   = () => characterLoader.loadAsync("Jump.fbx");
+const loadFall   = () => characterLoader.loadAsync("Falling.fbx");
+const loadThrowL = () => characterLoader.loadAsync("Throw Left.fbx");
+const loadThrowR = () => characterLoader.loadAsync("Throw Right.fbx");
 
-Promise.all([loadBase(), loadIdle(), loadWalk(), loadRun()])
-    .then(([baseFbx, idleFbx, walkFbx, runFbx]) => {
+Promise.all([loadBase(), loadIdle(), loadWalk(), loadRun(), loadJump(), loadFall(), loadThrowL(), loadThrowR()])
+    .then(([base, idle, walk, run, jump, fall, throwL, throwR]) => {
         
-        const characterModel = baseFbx;
-        
-        // Ajuste de escala crítico para modelos de Mixamo
+        const characterModel = base;
         characterModel.scale.set(0.008, 0.008, 0.008); 
         characterModel.rotateY(Math.PI); 
-        
         playerMesh.add(characterModel);
 
         characterModel.traverse((child) => {
@@ -134,13 +136,40 @@ Promise.all([loadBase(), loadIdle(), loadWalk(), loadRun()])
 
         mixer = new THREE.AnimationMixer(characterModel);
 
-        const idleClip = idleFbx.animations[0];
-        const walkClip = walkFbx.animations[0];
-        const runClip  = runFbx.animations[0];
+        // --- REGISTRO DE ANIMACIONES ---
+        actions['idle'] = mixer.clipAction(idle.animations[0]);
+        actions['walk'] = mixer.clipAction(walk.animations[0]);
+        actions['run']  = mixer.clipAction(run.animations[0]);
+        
+        actions['jump'] = mixer.clipAction(jump.animations[0]);
+        actions['fall'] = mixer.clipAction(fall.animations[0]);
+        
+        actions['throw_left'] = mixer.clipAction(throwL.animations[0]);
+        actions['throw_right'] = mixer.clipAction(throwR.animations[0]);
 
-        actions['idle'] = mixer.clipAction(idleClip);
-        actions['walk'] = mixer.clipAction(walkClip);
-        actions['run']  = mixer.clipAction(runClip);
+        // CONFIGURACIÓN DE ANIMACIONES "ONCE" (Una sola vez)
+        ['throw_left', 'throw_right', 'jump'].forEach(name => {
+            actions[name].setLoop(THREE.LoopOnce, 1);
+            actions[name].clampWhenFinished = true; 
+        });
+
+        // --- SOLUCIÓN 1: ACELERAR EL LANZAMIENTO ---
+        // El valor 1.0 es velocidad normal. 2.5 significa 250% más rápido.
+        // Ajusta este número hasta que sientas que el movimiento del brazo encaja con la pelota.
+        // Cámbialo de 2.5 a 5.0 (o incluso 8.0 si quieres que sea casi instantáneo)
+        actions['throw_left'].setEffectiveTimeScale(5.0);
+        actions['throw_right'].setEffectiveTimeScale(5.0);
+        
+        // (Opcional) Si sientes que salta en cámara lenta, también puedes acelerar el salto:
+        actions['jump'].setEffectiveTimeScale(1.5); 
+        // -------------------------------------------
+
+        // LISTENER: Cuando termine la animación de lanzar, apagamos la bandera
+        mixer.addEventListener('finished', (e) => {
+            if (e.action === actions['throw_left'] || e.action === actions['throw_right']) {
+                isThrowing = false;
+            }
+        });
 
         activeAction = actions['idle'];
         activeAction.play();
@@ -148,7 +177,6 @@ Promise.all([loadBase(), loadIdle(), loadWalk(), loadRun()])
     .catch(error => {
         console.error("Error cargando los archivos FBX:", error);
     });
-// -----------------------------------------------------------
 
 const playerVelocity = new THREE.Vector3();
 const playerDirection = new THREE.Vector3();
@@ -161,7 +189,6 @@ const vector1 = new THREE.Vector3();
 const vector2 = new THREE.Vector3();
 const vector3 = new THREE.Vector3();
 
-// --- CONTROLES DE ENTRADA ---
 document.addEventListener("keydown", (event) => {
     keyStates[event.code] = true;
 });
@@ -170,14 +197,12 @@ document.addEventListener("keyup", (event) => {
     keyStates[event.code] = false;
 });
 
-// Ocultar menú de clic derecho
 document.addEventListener("contextmenu", (event) => {
     event.preventDefault();
 });
 
 container.addEventListener("mousedown", (event) => {
     document.body.requestPointerLock();
-    // Clic Izquierdo (0) o Derecho (2) para cargar disparo
     if (event.button === 0 || event.button === 2) {
         mouseTime = performance.now();
     }
@@ -185,9 +210,9 @@ container.addEventListener("mousedown", (event) => {
 
 document.addEventListener("mouseup", (event) => {
     if (document.pointerLockElement !== null) {
-        // Soltar Clic Izquierdo (0) o Derecho (2) para disparar
         if (event.button === 0 || event.button === 2) {
-            throwBall();
+            throwBall(event.button);
+            // ------------------------------------
         }
     }
 });
@@ -208,7 +233,8 @@ function onWindowResize() {
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-function throwBall() {
+// --- ACTUALIZACIÓN DE LANZAMIENTO ---
+function throwBall(buttonPressed) {
     const sphere = spheres[sphereIdx];
     camera.getWorldDirection(playerDirection);
 
@@ -222,6 +248,18 @@ function throwBall() {
     sphere.velocity.addScaledVector(playerVelocity, 2);
 
     sphereIdx = (sphereIdx + 1) % spheres.length;
+
+    // LÓGICA DE ANIMACIÓN DE BRAZO
+    if (mixer) {
+        if (buttonPressed === 0) { // Clic Izquierdo -> Brazo Izquierdo
+            activeThrowAction = actions['throw_left'];
+        } else if (buttonPressed === 2) { // Clic Derecho -> Brazo Derecho
+            activeThrowAction = actions['throw_right'];
+        }
+        
+        isThrowing = true;
+        activeThrowAction.reset(); // Reinicia la animación por si disparas muy rápido
+    }
 }
 
 function playerCollisions() {
@@ -253,7 +291,6 @@ function updatePlayer(deltaTime) {
 
     playerCollisions();
 
-    // Actualización del Modelo a la Cápsula
     playerMesh.position.set(
         playerCollider.start.x,
         playerCollider.start.y - playerCollider.radius, 
@@ -261,31 +298,46 @@ function updatePlayer(deltaTime) {
     );
     playerMesh.rotation.y = cameraYaw;
 
-    // --- MÁQUINA DE ESTADOS DE ANIMACIÓN ---
+    // --- NUEVA MÁQUINA DE ESTADOS JERÁRQUICA ---
     if (mixer) {
         mixer.update(deltaTime);
 
-        let nextAction = actions['idle'];
+        let nextAction = actions['idle']; // Estado por defecto
 
-        if (playerOnFloor) {
+        // Jerarquía 1: Lanzar tiene la mayor prioridad visual
+        if (isThrowing) {
+            nextAction = activeThrowAction;
+        } 
+        // Jerarquía 2: Físicas de aire (Saltar y Caer)
+        else if (!playerOnFloor) {
+            if (playerVelocity.y > 0) {
+                nextAction = actions['jump'];
+            } else {
+                nextAction = actions['fall'];
+            }
+        } 
+        // Jerarquía 3: Movimiento en el suelo (Caminar / Reposo)
+        else {
             const isMoving = keyStates["KeyW"] || keyStates["KeyS"] || keyStates["KeyA"] || keyStates["KeyD"];
             if (isMoving) {
-                // Actualmente mapeado a 'walk', puedes implementar lógica extra para 'run' luego
                 nextAction = actions['walk']; 
+            } else {
+                nextAction = actions['idle'];
             }
         }
 
-        // Crossfade suave entre animaciones
+        // Ejecutar el Crossfade (Transición suave)
         if (activeAction && activeAction !== nextAction && nextAction !== undefined) {
             const currentAction = activeAction;
             activeAction = nextAction;
 
+            // Transición rápida de 0.2s. 
+            // Si venimos de un salto o lanzamiento, usamos reset() para que comience desde el inicio.
             currentAction.fadeOut(0.2);
             activeAction.reset().fadeIn(0.2).play();
         }
     }
 
-    // --- CÁMARA EN TERCERA PERSONA ---
     const targetPoint = playerMesh.position.clone();
     targetPoint.y += 1.2; 
 
@@ -294,7 +346,6 @@ function updatePlayer(deltaTime) {
     idealOffset.applyEuler(euler);
     const idealPosition = targetPoint.clone().add(idealOffset);
 
-    // Raycasting de la cámara contra el mundo
     const rayDirection = new THREE.Vector3().subVectors(idealPosition, targetPoint).normalize();
     const ray = new THREE.Ray(targetPoint, rayDirection);
     const collisionInfo = worldOctree.rayIntersect(ray);
@@ -409,7 +460,6 @@ function controls(deltaTime) {
     if (playerOnFloor && keyStates["Space"]) playerVelocity.y = 15;
 }
 
-// --- CARGA DEL ESCENARIO EN GLTF ---
 const envLoader = new GLTFLoader().setPath("./assets/models/gltf/brutalism/");
 
 envLoader.load("scene.gltf", (gltf) => {
@@ -428,7 +478,6 @@ envLoader.load("scene.gltf", (gltf) => {
         }
     });
 
-    // Reset de Spawn de la cápsula
     playerCollider.start.set(0, 0.35, 0);
     playerCollider.end.set(0, 1, 0);
     playerVelocity.set(0, 0, 0); 
