@@ -62,25 +62,21 @@ stats.domElement.style.top = "0px";
 container.appendChild(stats.domElement);
 
 const GRAVITY = 30;
-const NUM_SPHERES = 100;
-const SPHERE_RADIUS = 0.2;
+const NUM_PROJECTILES = 100;
 const STEPS_PER_FRAME = 5;
 
-const sphereGeometry = new THREE.IcosahedronGeometry(SPHERE_RADIUS, 5);
-const sphereMaterial = new THREE.MeshLambertMaterial({ color: 0xdede8d });
+const projectiles = [];
+let projectileIdx = 0;
 
-const spheres = [];
-let sphereIdx = 0;
+for (let i = 0; i < NUM_PROJECTILES; i++) {
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshLambertMaterial());
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
 
-for (let i = 0; i < NUM_SPHERES; i++) {
-    const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-    sphere.castShadow = true;
-    sphere.receiveShadow = true;
-    scene.add(sphere);
-
-    spheres.push({
-        mesh: sphere,
-        collider: new THREE.Sphere(new THREE.Vector3(0, -100, 0), SPHERE_RADIUS),
+    projectiles.push({
+        mesh: mesh,
+        collider: new THREE.Sphere(new THREE.Vector3(0, -100, 0), 0.1),
         velocity: new THREE.Vector3(),
     });
 }
@@ -100,28 +96,52 @@ const MAX_CAMERA_DISTANCE = 4.0;
 const playerMesh = new THREE.Group();
 scene.add(playerMesh);
 
-// --- VARIABLES DE MÁQUINA DE ESTADOS ---
 let mixer;
 const actions = {};
 let activeAction;
 let activeThrowAction = null; 
-let isThrowing = false; // Bandera para saber si está en medio de un lanzamiento
+let isThrowing = false;
 
+// --- DECLARACIÓN DE CARGADORES ---
+const envLoader = new GLTFLoader().setPath("./assets/models/gltf/brutalism/");
 const characterLoader = new FBXLoader().setPath("./assets/models/fbx/");
 
+// --- DEFINICIÓN DE PROMESAS UNIFICADAS ---
+const loadEnv    = () => envLoader.loadAsync("scene.gltf");
 const loadBase   = () => characterLoader.loadAsync("Vanguard By T. Choonyung.fbx");
 const loadIdle   = () => characterLoader.loadAsync("Breathing Idle.fbx");
 const loadWalk   = () => characterLoader.loadAsync("Walking.fbx");
 const loadRun    = () => characterLoader.loadAsync("Running.fbx");
-// NUEVAS ANIMACIONES
 const loadJump   = () => characterLoader.loadAsync("Jump.fbx");
 const loadFall   = () => characterLoader.loadAsync("Falling.fbx");
 const loadThrowL = () => characterLoader.loadAsync("Throw Left.fbx");
 const loadThrowR = () => characterLoader.loadAsync("Throw Right.fbx");
 
-Promise.all([loadBase(), loadIdle(), loadWalk(), loadRun(), loadJump(), loadFall(), loadThrowL(), loadThrowR()])
-    .then(([base, idle, walk, run, jump, fall, throwL, throwR]) => {
+// Forzamos al motor a esperar la descarga de TODO (incluyendo el mapa) antes de inicializar
+Promise.all([
+    loadBase(), loadIdle(), loadWalk(), loadRun(), 
+    loadJump(), loadFall(), loadThrowL(), loadThrowR(),
+    loadEnv() // Escenario añadido al pool asíncrono
+])
+    .then(([base, idle, walk, run, jump, fall, throwL, throwR, envGltf]) => {
         
+        // 1. CONFIGURACIÓN DEL ESCENARIO HORNEADO
+        scene.add(envGltf.scene);
+        worldOctree.fromGraphNode(envGltf.scene);
+
+        envGltf.scene.traverse((child) => {
+            if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+                if (child.material) {
+                    child.material.transparent = false;
+                    child.material.depthWrite = true;
+                }
+                if (child.material.map) child.material.map.anisotropy = 4;
+            }
+        });
+
+        // 2. CONFIGURACIÓN DEL JUGADOR
         const characterModel = base;
         characterModel.scale.set(0.008, 0.008, 0.008); 
         characterModel.rotateY(Math.PI); 
@@ -134,37 +154,27 @@ Promise.all([loadBase(), loadIdle(), loadWalk(), loadRun(), loadJump(), loadFall
             }
         });
 
+        // 3. REGISTRO DE ANIMACIONES
         mixer = new THREE.AnimationMixer(characterModel);
 
-        // --- REGISTRO DE ANIMACIONES ---
         actions['idle'] = mixer.clipAction(idle.animations[0]);
         actions['walk'] = mixer.clipAction(walk.animations[0]);
         actions['run']  = mixer.clipAction(run.animations[0]);
-        
         actions['jump'] = mixer.clipAction(jump.animations[0]);
         actions['fall'] = mixer.clipAction(fall.animations[0]);
-        
         actions['throw_left'] = mixer.clipAction(throwL.animations[0]);
         actions['throw_right'] = mixer.clipAction(throwR.animations[0]);
 
-        // CONFIGURACIÓN DE ANIMACIONES "ONCE" (Una sola vez)
         ['throw_left', 'throw_right', 'jump'].forEach(name => {
             actions[name].setLoop(THREE.LoopOnce, 1);
             actions[name].clampWhenFinished = true; 
         });
 
-        // --- SOLUCIÓN 1: ACELERAR EL LANZAMIENTO ---
-        // El valor 1.0 es velocidad normal. 2.5 significa 250% más rápido.
-        // Ajusta este número hasta que sientas que el movimiento del brazo encaja con la pelota.
-        // Cámbialo de 2.5 a 5.0 (o incluso 8.0 si quieres que sea casi instantáneo)
+        // Configuración de velocidades rápidas
         actions['throw_left'].setEffectiveTimeScale(5.0);
         actions['throw_right'].setEffectiveTimeScale(5.0);
-        
-        // (Opcional) Si sientes que salta en cámara lenta, también puedes acelerar el salto:
         actions['jump'].setEffectiveTimeScale(1.5); 
-        // -------------------------------------------
 
-        // LISTENER: Cuando termine la animación de lanzar, apagamos la bandera
         mixer.addEventListener('finished', (e) => {
             if (e.action === actions['throw_left'] || e.action === actions['throw_right']) {
                 isThrowing = false;
@@ -173,9 +183,27 @@ Promise.all([loadBase(), loadIdle(), loadWalk(), loadRun(), loadJump(), loadFall
 
         activeAction = actions['idle'];
         activeAction.play();
+
+        // 4. RESET DE POSICIÓN Y CÁMARA (Garantiza sincronía con el suelo del Octree)
+        playerCollider.start.set(0, 0.35, 0);
+        playerCollider.end.set(0, 1, 0);
+        playerVelocity.set(0, 0, 0); 
+        
+        cameraYaw = 0;
+        cameraPitch = 0;
+
+        // 5. HERRAMIENTAS DE DEBBUGING VISUAL
+        const helper = new OctreeHelper(worldOctree);
+        helper.visible = false;
+        scene.add(helper);
+
+        const gui = new GUI({ width: 200 });
+        gui.add({ debug: false }, "debug").onChange(function (value) {
+            helper.visible = value;
+        });
     })
     .catch(error => {
-        console.error("Error cargando los archivos FBX:", error);
+        console.error("Error crítico durante la carga de recursos:", error);
     });
 
 const playerVelocity = new THREE.Vector3();
@@ -211,8 +239,7 @@ container.addEventListener("mousedown", (event) => {
 document.addEventListener("mouseup", (event) => {
     if (document.pointerLockElement !== null) {
         if (event.button === 0 || event.button === 2) {
-            throwBall(event.button);
-            // ------------------------------------
+            throwProjectile(event.button); 
         }
     }
 });
@@ -233,32 +260,45 @@ function onWindowResize() {
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-// --- ACTUALIZACIÓN DE LANZAMIENTO ---
-function throwBall(buttonPressed) {
-    const sphere = spheres[sphereIdx];
+function throwProjectile(buttonPressed) {
+    const projectile = projectiles[projectileIdx];
+
+    if (projectile.mesh.geometry) projectile.mesh.geometry.dispose();
+    if (projectile.mesh.material) projectile.mesh.material.dispose();
+
+    const n = Math.floor(Math.random() * 5) + 3; 
+    const randomColor = new THREE.Color(Math.random(), Math.random(), Math.random());
+    const radius = Math.random() * 0.25 + 0.15; 
+    const height = Math.random() * 0.6 + 0.3;   
+
+    if (buttonPressed === 0) { 
+        projectile.mesh.geometry = new THREE.CylinderGeometry(radius, radius, height, n);
+        activeThrowAction = actions['throw_left'];
+    } else if (buttonPressed === 2) { 
+        projectile.mesh.geometry = new THREE.ConeGeometry(radius, height, n);
+        activeThrowAction = actions['throw_right'];
+    }
+
+    projectile.mesh.material = new THREE.MeshLambertMaterial({ color: randomColor });
+    projectile.collider.radius = Math.max(radius, height / 2);
+
     camera.getWorldDirection(playerDirection);
 
-    sphere.collider.center
+    projectile.collider.center
         .copy(playerCollider.end)
         .addScaledVector(playerDirection, playerCollider.radius * 1.5);
 
     const impulse = 15 + 30 * (1 - Math.exp((mouseTime - performance.now()) * 0.001));
 
-    sphere.velocity.copy(playerDirection).multiplyScalar(impulse);
-    sphere.velocity.addScaledVector(playerVelocity, 2);
+    projectile.velocity.copy(playerDirection).multiplyScalar(impulse);
+    projectile.velocity.addScaledVector(playerVelocity, 2);
 
-    sphereIdx = (sphereIdx + 1) % spheres.length;
+    projectileIdx = (projectileIdx + 1) % projectiles.length;
 
-    // LÓGICA DE ANIMACIÓN DE BRAZO
     if (mixer) {
-        if (buttonPressed === 0) { // Clic Izquierdo -> Brazo Izquierdo
-            activeThrowAction = actions['throw_left'];
-        } else if (buttonPressed === 2) { // Clic Derecho -> Brazo Derecho
-            activeThrowAction = actions['throw_right'];
-        }
-        
         isThrowing = true;
-        activeThrowAction.reset(); // Reinicia la animación por si disparas muy rápido
+        activeThrowAction.stop(); 
+        activeThrowAction.play();
     }
 }
 
@@ -298,17 +338,14 @@ function updatePlayer(deltaTime) {
     );
     playerMesh.rotation.y = cameraYaw;
 
-    // --- NUEVA MÁQUINA DE ESTADOS JERÁRQUICA ---
     if (mixer) {
         mixer.update(deltaTime);
 
-        let nextAction = actions['idle']; // Estado por defecto
+        let nextAction = actions['idle']; 
 
-        // Jerarquía 1: Lanzar tiene la mayor prioridad visual
         if (isThrowing) {
             nextAction = activeThrowAction;
         } 
-        // Jerarquía 2: Físicas de aire (Saltar y Caer)
         else if (!playerOnFloor) {
             if (playerVelocity.y > 0) {
                 nextAction = actions['jump'];
@@ -316,7 +353,6 @@ function updatePlayer(deltaTime) {
                 nextAction = actions['fall'];
             }
         } 
-        // Jerarquía 3: Movimiento en el suelo (Caminar / Reposo)
         else {
             const isMoving = keyStates["KeyW"] || keyStates["KeyS"] || keyStates["KeyA"] || keyStates["KeyD"];
             if (isMoving) {
@@ -326,13 +362,10 @@ function updatePlayer(deltaTime) {
             }
         }
 
-        // Ejecutar el Crossfade (Transición suave)
         if (activeAction && activeAction !== nextAction && nextAction !== undefined) {
             const currentAction = activeAction;
             activeAction = nextAction;
 
-            // Transición rápida de 0.2s. 
-            // Si venimos de un salto o lanzamiento, usamos reset() para que comience desde el inicio.
             currentAction.fadeOut(0.2);
             activeAction.reset().fadeIn(0.2).play();
         }
@@ -359,37 +392,37 @@ function updatePlayer(deltaTime) {
     camera.lookAt(targetPoint);
 }
 
-function playerSphereCollision(sphere) {
+function playerProjectileCollision(projectile) {
     const center = vector1
         .addVectors(playerCollider.start, playerCollider.end)
         .multiplyScalar(0.5);
 
-    const sphere_center = sphere.collider.center;
-    const r = playerCollider.radius + sphere.collider.radius;
+    const projectile_center = projectile.collider.center;
+    const r = playerCollider.radius + projectile.collider.radius;
     const r2 = r * r;
 
     for (const point of [playerCollider.start, playerCollider.end, center]) {
-        const d2 = point.distanceToSquared(sphere_center);
+        const d2 = point.distanceToSquared(projectile_center);
 
         if (d2 < r2) {
-            const normal = vector1.subVectors(point, sphere_center).normalize();
+            const normal = vector1.subVectors(point, projectile_center).normalize();
             const v1 = vector2.copy(normal).multiplyScalar(normal.dot(playerVelocity));
-            const v2 = vector3.copy(normal).multiplyScalar(normal.dot(sphere.velocity));
+            const v2 = vector3.copy(normal).multiplyScalar(normal.dot(projectile.velocity));
 
             playerVelocity.add(v2).sub(v1);
-            sphere.velocity.add(v1).sub(v2);
+            projectile.velocity.add(v1).sub(v2);
 
             const d = (r - Math.sqrt(d2)) / 2;
-            sphere_center.addScaledVector(normal, -d);
+            projectile_center.addScaledVector(normal, -d);
         }
     }
 }
 
-function spheresCollisions() {
-    for (let i = 0, length = spheres.length; i < length; i++) {
-        const s1 = spheres[i];
+function projectilesCollisions() {
+    for (let i = 0, length = projectiles.length; i < length; i++) {
+        const s1 = projectiles[i];
         for (let j = i + 1; j < length; j++) {
-            const s2 = spheres[j];
+            const s2 = projectiles[j];
             const d2 = s1.collider.center.distanceToSquared(s2.collider.center);
             const r = s1.collider.radius + s2.collider.radius;
             const r2 = r * r;
@@ -410,27 +443,27 @@ function spheresCollisions() {
     }
 }
 
-function updateSpheres(deltaTime) {
-    spheres.forEach((sphere) => {
-        sphere.collider.center.addScaledVector(sphere.velocity, deltaTime);
-        const result = worldOctree.sphereIntersect(sphere.collider);
+function updateProjectiles(deltaTime) {
+    projectiles.forEach((projectile) => {
+        projectile.collider.center.addScaledVector(projectile.velocity, deltaTime);
+        const result = worldOctree.sphereIntersect(projectile.collider);
 
         if (result) {
-            sphere.velocity.addScaledVector(result.normal, -result.normal.dot(sphere.velocity) * 1.5);
-            sphere.collider.center.add(result.normal.multiplyScalar(result.depth));
+            projectile.velocity.addScaledVector(result.normal, -result.normal.dot(projectile.velocity) * 1.5);
+            projectile.collider.center.add(result.normal.multiplyScalar(result.depth));
         } else {
-            sphere.velocity.y -= GRAVITY * deltaTime;
+            projectile.velocity.y -= GRAVITY * deltaTime;
         }
 
         const damping = Math.exp(-1.5 * deltaTime) - 1;
-        sphere.velocity.addScaledVector(sphere.velocity, damping);
-        playerSphereCollision(sphere);
+        projectile.velocity.addScaledVector(projectile.velocity, damping);
+        playerProjectileCollision(projectile);
     });
 
-    spheresCollisions();
+    projectilesCollisions();
 
-    for (const sphere of spheres) {
-        sphere.mesh.position.copy(sphere.collider.center);
+    for (const projectile of projectiles) {
+        projectile.mesh.position.copy(projectile.collider.center);
     }
 }
 
@@ -460,41 +493,6 @@ function controls(deltaTime) {
     if (playerOnFloor && keyStates["Space"]) playerVelocity.y = 15;
 }
 
-const envLoader = new GLTFLoader().setPath("./assets/models/gltf/brutalism/");
-
-envLoader.load("scene.gltf", (gltf) => {
-    scene.add(gltf.scene);
-    worldOctree.fromGraphNode(gltf.scene);
-
-    gltf.scene.traverse((child) => {
-        if (child.isMesh) {
-            child.castShadow = true;
-            child.receiveShadow = true;
-            if (child.material) {
-                child.material.transparent = false;
-                child.material.depthWrite = true;
-            }
-            if (child.material.map) child.material.map.anisotropy = 4;
-        }
-    });
-
-    playerCollider.start.set(0, 0.35, 0);
-    playerCollider.end.set(0, 1, 0);
-    playerVelocity.set(0, 0, 0); 
-    
-    cameraYaw = 0;
-    cameraPitch = 0;
-
-    const helper = new OctreeHelper(worldOctree);
-    helper.visible = false;
-    scene.add(helper);
-
-    const gui = new GUI({ width: 200 });
-    gui.add({ debug: false }, "debug").onChange(function (value) {
-        helper.visible = value;
-    });
-});
-
 function teleportPlayerIfOob() {
     if (camera.position.y <= -25) {
         playerCollider.start.set(0, 0.35, 0);
@@ -511,7 +509,7 @@ function animate() {
     for (let i = 0; i < STEPS_PER_FRAME; i++) {
         controls(deltaTime);
         updatePlayer(deltaTime);
-        updateSpheres(deltaTime);
+        updateProjectiles(deltaTime); 
         teleportPlayerIfOob();
     }
 
